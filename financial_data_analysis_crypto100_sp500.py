@@ -13,25 +13,31 @@ import pytz
 # Database connection
 def connect_db():
     return sqlite3.connect("top100_sp500_fiscal_data.db", timeout=10)  # ✅ Added timeout
+
+
 def initialize_db():
     """Ensure required tables exist and enable WAL mode."""
     with connect_db() as conn:
         cursor = conn.cursor()
         cursor.executescript("""
         PRAGMA journal_mode=WAL;
+
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT,
             level TEXT,
             message TEXT
         );
+
         CREATE TABLE IF NOT EXISTS summary_reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             report_date TEXT,
             fetched_stocks INTEGER,
             avg_crypto_price REAL
         );
-        CREATE TABLE IF NOT EXISTS financial_data (
+
+        -- Separate table for cryptocurrency data
+        CREATE TABLE IF NOT EXISTS crypto_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             asset_name TEXT,
             price REAL,
@@ -40,9 +46,62 @@ def initialize_db():
             recorded_date TEXT,
             UNIQUE(asset_name, recorded_date)
         );
+
+        -- Separate table for stock market data
+        CREATE TABLE IF NOT EXISTS stock_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset_name TEXT,
+            price REAL,
+            volume REAL,
+            recorded_date TEXT,
+            UNIQUE(asset_name, recorded_date)
+        );
         """)
         conn.commit()
         log_message("INFO", "✅ WAL Mode enabled and database initialized successfully.")
+
+
+def store_data(crypto_data, sp500_data):
+    try:
+        log_message("INFO", "Storing data in database...")
+
+        with sqlite3.connect("top100_sp500_fiscal_data.db") as conn:
+            cursor = conn.cursor()
+            current_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            # ✅ Store cryptocurrency data separately
+            if crypto_data:
+                crypto_insert_query = """
+                    INSERT INTO crypto_data 
+                    (asset_name, price, market_cap, volume, recorded_date)
+                    VALUES (?, ?, ?, ?, ?)
+                """
+                crypto_records = [
+                    (crypto["name"], crypto["current_price"], crypto["market_cap"], crypto["total_volume"],
+                     current_timestamp)
+                    for crypto in crypto_data[:100]  # ✅ Store only top 100 cryptos
+                ]
+                cursor.executemany(crypto_insert_query, crypto_records)
+                log_message("INFO", f"✅ {len(crypto_records)} cryptos stored successfully at {current_timestamp}.")
+
+            # ✅ Store S&P 500 stock data separately
+            if sp500_data:
+                stock_insert_query = """
+                    INSERT INTO stock_data 
+                    (asset_name, price, volume, recorded_date)
+                    VALUES (?, ?, ?, ?)
+                """
+                stock_records = [(symbol, price, volume, current_timestamp) for symbol, price, _, volume, _ in
+                                 sp500_data]
+                cursor.executemany(stock_insert_query, stock_records)
+                log_message("INFO", f"✅ {len(stock_records)} stocks stored successfully at {current_timestamp}.")
+
+            conn.commit()
+
+        log_message("INFO", "✅ Data storage complete.")
+
+    except sqlite3.OperationalError as e:
+        log_message("ERROR", f"Database error: {e}")
 
 
 # ✅ Use a persistent connection for logging
@@ -73,48 +132,6 @@ def fetch_with_retries(url, retries=3, wait=10):
             log_message("ERROR", f"Attempt {attempt + 1} failed: {e}")
             time.sleep(wait * (2 ** attempt))
     return None
-
-
-# Function to store data in SQLite
-def store_data(crypto_data, sp500_data):
-    try:
-        log_message("INFO", "Storing data in database...")
-
-        # ✅ Use `with` to ensure connection is closed properly
-        with sqlite3.connect("top100_sp500_fiscal_data.db") as conn:
-            cursor = conn.cursor()
-            current_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-            # ✅ Ensure cryptos are stored correctly per pull
-            if crypto_data:
-                crypto_insert_query = """
-                    INSERT INTO financial_data 
-                    (asset_name, price, market_cap, volume, recorded_date)
-                    VALUES (?, ?, ?, ?, ?)
-                """
-                records = [
-                    (crypto["name"], crypto["current_price"], crypto["market_cap"], crypto["total_volume"], current_timestamp)
-                    for crypto in crypto_data[:100]  # ✅ Store only top 100 cryptos
-                ]
-                cursor.executemany(crypto_insert_query, records)
-                log_message("INFO", f"✅ {len(records)} cryptos stored successfully at {current_timestamp}.")
-
-            # ✅ Ensure stocks are stored with a timestamp
-            if sp500_data:
-                stock_insert_query = """
-                    INSERT INTO financial_data 
-                    (asset_name, price, market_cap, volume, recorded_date)
-                    VALUES (?, ?, ?, ?, ?)
-                """
-                stock_records = [(symbol, price, None, volume, current_timestamp) for symbol, price, _, volume, _ in sp500_data]
-                cursor.executemany(stock_insert_query, stock_records)
-
-            conn.commit()
-
-        log_message("INFO", "✅ Data storage complete.")
-
-    except sqlite3.OperationalError as e:
-        log_message("ERROR", f"Database error: {e}")
 
 
 def format_yf_ticker(ticker):
@@ -215,38 +232,114 @@ def fetch_crypto_data():
     crypto_url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1"
     return fetch_with_retries(crypto_url)
 
-
 def generate_summary_report():
-    """Generates an optimized summary report."""
+    """Generates an optimized summary report including stock and crypto performance."""
     log_message("INFO", "Generating optimized summary report...")
 
     conn = connect_db()
     cursor = conn.cursor()
 
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    # ✅ Fix date query by matching full timestamp format
+    cursor.execute("SELECT COUNT(*) FROM stock_data WHERE recorded_date LIKE ? || '%'", (today,))
+    stored_stocks = cursor.fetchone()[0] or 0
+
+    cursor.execute("SELECT COUNT(*) FROM crypto_data WHERE recorded_date LIKE ? || '%'", (today,))
+    stored_cryptos = cursor.fetchone()[0] or 0
+
+    # ✅ Fix performance queries to ensure proper percentage change calculations
     cursor.execute("""
-        SELECT COUNT(*) FROM financial_data WHERE recorded_date = DATE('now')
-    """)
-    fetched_stocks = cursor.fetchone()[0] or 0
+        SELECT asset_name, 
+               COALESCE(((price - LAG(price) OVER (PARTITION BY asset_name ORDER BY recorded_date)) / 
+               NULLIF(LAG(price) OVER (PARTITION BY asset_name ORDER BY recorded_date), 0)) * 100, 0) AS percent_change
+        FROM stock_data 
+        WHERE recorded_date LIKE ? || '%'
+        ORDER BY percent_change DESC
+        LIMIT 3
+    """, (today,))
+    top_stocks = cursor.fetchall()
 
     cursor.execute("""
-        SELECT AVG(price) FROM financial_data 
-        WHERE asset_name IN (SELECT asset_name FROM financial_data WHERE recorded_date = DATE('now') LIMIT 100)
-    """)
-    avg_crypto_price = cursor.fetchone()[0] or 0
+        SELECT asset_name, 
+               COALESCE(((price - LAG(price) OVER (PARTITION BY asset_name ORDER BY recorded_date)) / 
+               NULLIF(LAG(price) OVER (PARTITION BY asset_name ORDER BY recorded_date), 0)) * 100, 0) AS percent_change
+        FROM stock_data 
+        WHERE recorded_date LIKE ? || '%'
+        ORDER BY percent_change ASC
+        LIMIT 3
+    """, (today,))
+    worst_stocks = cursor.fetchall()
 
-    report_date = datetime.now().strftime('%Y-%m-%d')
+    cursor.execute("""
+        SELECT asset_name, 
+               COALESCE(((price - LAG(price) OVER (PARTITION BY asset_name ORDER BY recorded_date)) / 
+               NULLIF(LAG(price) OVER (PARTITION BY asset_name ORDER BY recorded_date), 0)) * 100, 0) AS percent_change
+        FROM crypto_data 
+        WHERE recorded_date LIKE ? || '%'
+        ORDER BY percent_change DESC
+        LIMIT 3
+    """, (today,))
+    top_cryptos = cursor.fetchall()
 
+    cursor.execute("""
+        SELECT asset_name, 
+               COALESCE(((price - LAG(price) OVER (PARTITION BY asset_name ORDER BY recorded_date)) / 
+               NULLIF(LAG(price) OVER (PARTITION BY asset_name ORDER BY recorded_date), 0)) * 100, 0) AS percent_change
+        FROM crypto_data 
+        WHERE recorded_date LIKE ? || '%'
+        ORDER BY percent_change ASC
+        LIMIT 3
+    """, (today,))
+    worst_cryptos = cursor.fetchall()
+
+    conn.close()
+
+    # ✅ Market Sentiment Analysis
+    total_gainers = len([s for s in top_stocks if s[1] is not None]) + len([c for c in top_cryptos if c[1] is not None])
+    total_losers = len([s for s in worst_stocks if s[1] is not None]) + len([c for c in worst_cryptos if c[1] is not None])
+    market_sentiment = "Bullish" if total_gainers > total_losers else "Bearish"
+
+    # ✅ Store the report in `summary_reports` table
+    conn = connect_db()
+    cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO summary_reports (report_date, fetched_stocks, avg_crypto_price)
         VALUES (?, ?, ?)
-    """, (report_date, fetched_stocks, avg_crypto_price))
-
+    """, (today, stored_stocks, stored_cryptos))
     conn.commit()
     conn.close()
 
-    log_message("INFO",
-                f"Summary Report Generated: {report_date} | Stocks: {fetched_stocks} | Avg Crypto Price: {avg_crypto_price:.2f}")
+    # ✅ Print the fixed report
+    print("\n📊 Daily Market Summary ({})".format(today))
+    print("-----------------------------------")
+    print("Stocks Retrieved: {}".format(stored_stocks))
+    print("Cryptocurrencies Retrieved: {}\n".format(stored_cryptos))
 
+    print("📈 Top 3 Performing Stocks:")
+    for stock in top_stocks:
+        percent_change = stock[1] if stock[1] is not None else "N/A"
+        print("{}: {:.2f}%".format(stock[0], percent_change) if isinstance(percent_change, (int, float)) else "{}: {}".format(stock[0], percent_change))
+
+    print("\n📉 Worst 3 Performing Stocks:")
+    for stock in worst_stocks:
+        percent_change = stock[1] if stock[1] is not None else "N/A"
+        print("{}: {:.2f}%".format(stock[0], percent_change) if isinstance(percent_change, (int, float)) else "{}: {}".format(stock[0], percent_change))
+
+    print("\n🔥 Top 3 Cryptos:")
+    for crypto in top_cryptos:
+        percent_change = crypto[1] if crypto[1] is not None else "N/A"
+        print("{}: {:.2f}%".format(crypto[0], percent_change) if isinstance(percent_change, (int, float)) else "{}: {}".format(crypto[0], percent_change))
+
+    print("\n❄️ Worst 3 Cryptos:")
+    for crypto in worst_cryptos:
+        percent_change = crypto[1] if crypto[1] is not None else "N/A"
+        print("{}: {:.2f}%".format(crypto[0], percent_change) if isinstance(percent_change, (int, float)) else "{}: {}".format(crypto[0], percent_change))
+
+    print("\n📊 Market Sentiment: {}".format(market_sentiment))
+    print("-----------------------------------")
+
+    log_message("INFO", "✅ Summary Report Generated Successfully.")
 
 # Initialize database
 initialize_db()
