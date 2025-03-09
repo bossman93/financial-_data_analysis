@@ -26,8 +26,10 @@ def fetch_data(crypto):
 
     # Ensure correct column mapping
     data = response.json()
-    df = pd.DataFrame(data, columns=["timestamp", "Open", "High", "Low", "Close", "Volume",
-                                     "CloseTime", "QuoteVolume", "Trades", "TakerBase", "TakerQuote", "Ignore"])
+    df = pd.DataFrame(data, columns=[
+        "timestamp", "Open", "High", "Low", "Close", "Volume",
+        "CloseTime", "QuoteVolume", "Trades", "TakerBase", "TakerQuote", "Ignore"
+    ])
 
     # Convert timestamp and set as index
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms')
@@ -42,12 +44,14 @@ def fetch_data(crypto):
 def calculate_indicators(df):
     df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
     df['RSI'] = 100 - (100 / (1 + df['Close'].diff().where(df['Close'].diff() > 0, 0).rolling(14).mean() /
-                          -df['Close'].diff().where(df['Close'].diff() < 0, 0).rolling(14).mean()))
+                              -df['Close'].diff().where(df['Close'].diff() < 0, 0).rolling(14).mean()))
     df['Bollinger_Upper'] = df['Close'].rolling(20).mean() + 2 * df['Close'].rolling(20).std()
     df['Bollinger_Lower'] = df['Close'].rolling(20).mean() - 2 * df['Close'].rolling(20).std()
-    df['Stochastic_RSI'] = (df['RSI'] - df['RSI'].rolling(14).min()) / (df['RSI'].rolling(14).max() - df['RSI'].rolling(14).min())
+    df['Stochastic_RSI'] = (df['RSI'] - df['RSI'].rolling(14).min()) / (
+                df['RSI'].rolling(14).max() - df['RSI'].rolling(14).min())
     df['price_change'] = df['Close'].pct_change().shift(-1) * 100
     return df.dropna()
+
 
 def store_results(crypto, df):
     conn = sqlite3.connect(db_path)
@@ -57,9 +61,11 @@ def store_results(crypto, df):
         cursor.execute("""
         INSERT INTO indicators (crypto, date, macd, rsi, bollinger_upper, bollinger_lower, stochastic_rsi, market_condition)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (crypto, index.strftime('%Y-%m-%d'), row['MACD'], row['RSI'], row['Bollinger_Upper'], row['Bollinger_Lower'], row['Stochastic_RSI'], market_condition))
+                       (crypto, index.strftime('%Y-%m-%d'), row['MACD'], row['RSI'], row['Bollinger_Upper'],
+                        row['Bollinger_Lower'], row['Stochastic_RSI'], market_condition))
     conn.commit()
     conn.close()
+
 
 def train_xgboost():
     conn = sqlite3.connect(db_path)
@@ -72,13 +78,28 @@ def train_xgboost():
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
-    print(f"Model Accuracy: {accuracy:.4f}")
+    report = classification_report(y_test, y_pred, output_dict=True)
+
+    with open("trade_logs.txt", "a") as log_file:
+        log_file.write("\n--- Cryptocurrency Performance Analysis ---\n")
+        for crypto in sorted(df['crypto'].unique()):
+            crypto_data = df[df['crypto'] == crypto]
+            crypto_accuracy = accuracy_score(crypto_data['market_condition'], model.predict(
+                crypto_data[['macd', 'rsi', 'bollinger_upper', 'bollinger_lower', 'stochastic_rsi']]))
+            summary = f"{crypto}: Accuracy = {crypto_accuracy:.4f}"
+            print(summary)
+            log_file.write(summary + "\n")
+        log_file.write("\nOverall Model Accuracy: {:.4f}\n".format(accuracy))
+
+    print("\nOverall Model Accuracy: {:.4f}".format(accuracy))
     return accuracy
+
 
 def generate_commit_hash():
     with open(db_path, 'rb') as f:
         file_hash = hashlib.sha256(f.read()).hexdigest()
     print(f"✅ Commit Hash: {file_hash}")
+
 
 if __name__ == "__main__":
     cryptos = ['BTC', 'ETH', 'XRP', 'BNB', 'SOL', 'ADA', 'DOGE', 'TRX', 'LINK', 'HBAR']
