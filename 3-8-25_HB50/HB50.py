@@ -8,6 +8,7 @@ from sklearn.metrics import accuracy_score, classification_report
 import logging
 import hashlib
 import os
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(filename="trade_logs.txt", level=logging.INFO,
@@ -86,7 +87,7 @@ def train_xgboost():
             crypto_data = df[df['crypto'] == crypto]
             crypto_accuracy = accuracy_score(crypto_data['market_condition'], model.predict(
                 crypto_data[['macd', 'rsi', 'bollinger_upper', 'bollinger_lower', 'stochastic_rsi']]))
-            summary = f"{crypto}: Accuracy = {crypto_accuracy:.4f}"
+            summary = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {crypto}: Accuracy = {crypto_accuracy:.4f}"
             print(summary)
             log_file.write(summary + "\n")
         log_file.write("\nOverall Model Accuracy: {:.4f}\n".format(accuracy))
